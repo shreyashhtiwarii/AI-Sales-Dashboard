@@ -26,15 +26,17 @@ def _fit_predict(train, horizon):
     return fidx, np.clip(lin.predict(Xf) + gb.predict(Xf), 0, None), float(np.std(resid))
 
 def forecast(orders, horizon=30):
-    s = orders.groupby("date").amount.sum().asfreq("D", fill_value=0)
+    df = orders.copy()
+    df["date"] = pd.to_datetime(df["date"]).dt.floor("D")
+    s = df.groupby("date").amount.sum().asfreq("D", fill_value=0)
     _, p, _ = _fit_predict(s[:-horizon], horizon)  # backtest on last 30 days
-    wape = float(np.abs(s[-horizon:].values - p).sum() / s[-horizon:].sum())
+    wape = float(np.abs(s[-horizon:].values - p).sum() / max(s[-horizon:].sum(), 1e-6))
     idx, pred, sd = _fit_predict(s, horizon)
     return {
         "wape": round(wape, 3),
-        "history": [{"date": d.strftime("%Y-%m-%d"), "revenue": round(v, 2)} for d, v in s[-90:].items()],
-        "forecast": [{"date": d.strftime("%Y-%m-%d"), "revenue": round(v, 2),
-                      "lower": round(max(v - 1.96 * sd, 0), 2), "upper": round(v + 1.96 * sd, 2)}
+        "history": [{"date": d.strftime("%Y-%m-%d"), "revenue": round(float(v), 2)} for d, v in s[-90:].items()],
+        "forecast": [{"date": d.strftime("%Y-%m-%d"), "revenue": round(float(v), 2),
+                      "lower": round(max(float(v - 1.96 * sd), 0), 2), "upper": round(float(v + 1.96 * sd), 2)}
                      for d, v in zip(idx, pred)],
     }
 
@@ -50,7 +52,7 @@ def churn_and_segments(orders, window=90):
     active = orders[orders.date > cut].customer_id.unique()
     y = (~Xtr.index.isin(active)).astype(int)  # churned = no order in last 90 days
     Xa, Xb, ya, yb = train_test_split(Xtr, y, test_size=.25, random_state=0, stratify=y)
-    rf = RandomForestClassifier(300, max_depth=6, random_state=0).fit(Xa, ya)
+    rf = RandomForestClassifier(200, max_depth=6, random_state=0, n_jobs=-1).fit(Xa, ya)
     auc = float(roc_auc_score(yb, rf.predict_proba(Xb)[:, 1]))
 
     now = _rfm(orders, end)

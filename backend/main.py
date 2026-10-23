@@ -1,3 +1,11 @@
+import sys
+from pathlib import Path
+
+# Ensure backend directory is in Python path regardless of execution directory
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 from contextlib import asynccontextmanager
 import os, sqlite3
 import pandas as pd
@@ -7,6 +15,21 @@ from data import load_orders, DB_PATH
 import ml
 
 STATE = {}
+
+def get_orders():
+    if "orders" not in STATE or STATE["orders"] is None or STATE["orders"].empty:
+        STATE["orders"] = load_orders()
+    return STATE["orders"]
+
+def get_forecast():
+    if "forecast" not in STATE or STATE["forecast"] is None:
+        STATE["forecast"] = ml.forecast(get_orders())
+    return STATE["forecast"]
+
+def get_churn():
+    if "churn" not in STATE or STATE["churn"] is None:
+        STATE["churn"] = ml.churn_and_segments(get_orders())
+    return STATE["churn"]
 
 @asynccontextmanager
 async def lifespan(app):
@@ -18,9 +41,34 @@ async def lifespan(app):
 app = FastAPI(title="AI Sales Analytics API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@app.get("/")
+def root():
+    return {
+        "status": "online",
+        "service": "AI Sales Analytics API",
+        "docs": "/docs",
+        "endpoints": [
+            "/api/kpis",
+            "/api/forecast",
+            "/api/channels",
+            "/api/churn",
+            "/api/categories",
+            "/api/regions",
+            "/api/recent-orders",
+            "/api/health",
+        ],
+    }
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok",
+        "ready": "orders" in STATE and STATE["orders"] is not None and not STATE["orders"].empty,
+    }
+
 @app.get("/api/kpis")
 def kpis():
-    o = STATE["orders"]
+    o = get_orders()
     end = o.date.max()
     cur = o[o.date > end - pd.Timedelta(days=30)]
     prev = o[(o.date <= end - pd.Timedelta(days=30)) & (o.date > end - pd.Timedelta(days=60))]
@@ -48,13 +96,13 @@ def kpis():
         "revenue_30d": round(cur_rev, 2),
         "growth_pct": round(((cur_rev / prev_rev) - 1) * 100, 1) if prev_rev else 0,
         "orders_30d": cur_orders,
-        "aov": round(cur_aov, 2),
+        "aov": round(cur_aov, 2) if pd.notna(cur_aov) else 0.0,
         "active_customers": cur_cust,
         "changes": {
             "revenue": round(((cur_rev / prev_rev) - 1) * 100, 1) if prev_rev else 0,
             "growth": round(((cur_rev / prev_rev) - 1) * 100, 1) if prev_rev else 0,
             "orders": round(((cur_orders / prev_orders) - 1) * 100, 1) if prev_orders else 0,
-            "aov": round(((cur_aov / prev_aov) - 1) * 100, 1) if prev_aov else 0,
+            "aov": round(((cur_aov / prev_aov) - 1) * 100, 1) if (prev_aov and pd.notna(cur_aov) and pd.notna(prev_aov)) else 0,
             "customers": round(((cur_cust / prev_cust) - 1) * 100, 1) if prev_cust else 0,
         },
         "sparklines": {
@@ -68,7 +116,7 @@ def kpis():
 
 @app.get("/api/regions")
 def regions():
-    o = STATE["orders"]
+    o = get_orders()
     o = o[o.date > o.date.max() - pd.Timedelta(days=90)]
     return o.groupby("region").agg(
         revenue=("amount", "sum"),
@@ -78,7 +126,7 @@ def regions():
 
 @app.get("/api/channels")
 def channels():
-    o = STATE["orders"]
+    o = get_orders()
     o = o[o.date > o.date.max() - pd.Timedelta(days=90)]
     return o.groupby("channel").agg(
         revenue=("amount", "sum"),
@@ -87,7 +135,7 @@ def channels():
 
 @app.get("/api/categories")
 def categories():
-    o = STATE["orders"]
+    o = get_orders()
     end = o.date.max()
     last90 = o[o.date > end - pd.Timedelta(days=90)]
     total = last90.amount.sum()
@@ -100,7 +148,7 @@ def categories():
 
 @app.get("/api/recent-orders")
 def recent_orders():
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     q = """
     SELECT o.order_id, o.date, o.product_cat, o.channel, o.region, o.amount, o.quantity, c.name, c.email
     FROM orders o
@@ -114,9 +162,13 @@ def recent_orders():
 
 @app.get("/api/forecast")
 def forecast():
-    return STATE["forecast"]
+    return get_forecast()
 
 @app.get("/api/churn")
 def churn():
-    return STATE["churn"]
+    return get_churn()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
 
